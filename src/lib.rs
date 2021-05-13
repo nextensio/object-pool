@@ -55,6 +55,7 @@
 use parking_lot::Mutex;
 use std::mem::{ManuallyDrop, forget};
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 pub type Stack<T> = Vec<T>;
 
@@ -90,33 +91,31 @@ impl<T> Pool<T> {
     }
 
     #[inline]
-    pub fn try_pull(&self) -> Option<Reusable<T>> {
-        self.objects
-            .lock()
-            .pop()
-            .map(|data| Reusable::new(self, data))
-    }
-
-    #[inline]
-    pub fn pull<F: Fn() -> T>(&self, fallback: F) -> Reusable<T> {
-        self.try_pull()
-            .unwrap_or_else(|| Reusable::new(self, fallback()))
-    }
-
-    #[inline]
     pub fn attach(&self, t: T) {
         self.objects.lock().push(t)
     }
 }
 
-pub struct Reusable<'a, T> {
-    pool: &'a Pool<T>,
+pub fn try_pull<T>(pool: Arc<Pool<T>>) -> Option<Reusable<T>> {
+    pool.objects
+        .lock()
+        .pop()
+        .map(|data| Reusable::new(pool.clone(), data))
+}
+
+pub fn pull<T, F: Fn() -> T>(pool: Arc<Pool<T>>, fallback: F) -> Reusable<T> {
+    try_pull(pool.clone())
+        .unwrap_or_else(|| Reusable::new(pool.clone(), fallback()))
+}
+
+pub struct Reusable<T> {
+    pool: Arc<Pool<T>>,
     data: ManuallyDrop<T>,
 }
 
-impl<'a, T> Reusable<'a, T> {
+impl<T> Reusable<T> {
     #[inline]
-    pub fn new(pool: &'a Pool<T>, t: T) -> Self {
+    pub fn new(pool: Arc<Pool<T>>, t: T) -> Self {
         Self {
             pool,
             data: ManuallyDrop::new(t),
@@ -124,8 +123,9 @@ impl<'a, T> Reusable<'a, T> {
     }
 
     #[inline]
-    pub fn detach(mut self) -> (&'a Pool<T>, T) {
-        let ret = unsafe { (self.pool, self.take()) };
+    pub fn detach(mut self) -> (Arc<Pool<T>>, T) {
+        let pool = self.pool.clone();
+        let ret = unsafe { (pool, self.take()) };
         forget(self);
         ret
     }
@@ -135,7 +135,7 @@ impl<'a, T> Reusable<'a, T> {
     }
 }
 
-impl<'a, T> Deref for Reusable<'a, T> {
+impl<T> Deref for Reusable<T> {
     type Target = T;
 
     #[inline]
@@ -144,17 +144,18 @@ impl<'a, T> Deref for Reusable<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for Reusable<'a, T> {
+impl<T> DerefMut for Reusable<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
     }
 }
 
-impl<'a, T> Drop for Reusable<'a, T> {
+impl<T> Drop for Reusable<T> {
     #[inline]
     fn drop(&mut self) {
-        unsafe { self.pool.attach(self.take()) }
+        let pool = self.pool.clone();
+        unsafe { pool.attach(self.take()) }
     }
 }
 
