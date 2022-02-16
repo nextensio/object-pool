@@ -56,11 +56,14 @@ use parking_lot::Mutex;
 use std::mem::{ManuallyDrop, forget};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Instant;
 
 pub type Stack<T> = Vec<T>;
 
 pub struct Pool<T> {
     objects: Mutex<Stack<T>>,
+    pub last_fail: Instant,
+    pub cnt_fail: usize
 }
 
 impl<T> Pool<T> {
@@ -77,6 +80,8 @@ impl<T> Pool<T> {
 
         Pool {
             objects: Mutex::new(objects),
+            last_fail: Instant::now(),
+            cnt_fail: 0
         }
     }
 
