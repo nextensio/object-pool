@@ -57,13 +57,14 @@ use std::mem::{ManuallyDrop, forget};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Instant;
+use std::sync::atomic::AtomicUsize;
 
 pub type Stack<T> = Vec<T>;
 
 pub struct Pool<T> {
     objects: Mutex<Stack<T>>,
-    pub last_fail: Instant,
-    pub cnt_fail: usize
+    pub last_fail: Mutex<Instant>,
+    pub cnt_fail: AtomicUsize
 }
 
 impl<T> Pool<T> {
@@ -80,8 +81,8 @@ impl<T> Pool<T> {
 
         Pool {
             objects: Mutex::new(objects),
-            last_fail: Instant::now(),
-            cnt_fail: 0
+            last_fail: Mutex::new(Instant::now()),
+            cnt_fail: AtomicUsize::new(0)
         }
     }
 
