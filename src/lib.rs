@@ -63,13 +63,14 @@ pub type Stack<T> = Vec<T>;
 
 pub struct Pool<T> {
     objects: Mutex<Stack<T>>,
+    pub name: String,
     pub last_fail: Mutex<Instant>,
     pub cnt_fail: AtomicUsize
 }
 
 impl<T> Pool<T> {
     #[inline]
-    pub fn new<F>(cap: usize, init: F) -> Pool<T>
+    pub fn new<F>(name: String, cap: usize, init: F) -> Pool<T>
     where
         F: Fn() -> T,
     {
@@ -81,6 +82,7 @@ impl<T> Pool<T> {
 
         Pool {
             objects: Mutex::new(objects),
+            name,
             last_fail: Mutex::new(Instant::now()),
             cnt_fail: AtomicUsize::new(0)
         }
