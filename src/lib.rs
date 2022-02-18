@@ -53,11 +53,11 @@
 //! [`std::sync::Arc`]: https://doc.rust-lang.org/stable/std/sync/struct.Arc.html
 
 use parking_lot::Mutex;
-use std::mem::{ManuallyDrop, forget};
+use std::mem::{forget, ManuallyDrop};
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
-use std::sync::atomic::AtomicUsize;
 
 pub type Stack<T> = Vec<T>;
 
@@ -65,7 +65,7 @@ pub struct Pool<T> {
     objects: Mutex<Stack<T>>,
     pub name: String,
     pub last_fail: Mutex<Instant>,
-    pub cnt_fail: AtomicUsize
+    pub cnt_fail: AtomicUsize,
 }
 
 impl<T> Pool<T> {
@@ -84,7 +84,7 @@ impl<T> Pool<T> {
             objects: Mutex::new(objects),
             name,
             last_fail: Mutex::new(Instant::now()),
-            cnt_fail: AtomicUsize::new(0)
+            cnt_fail: AtomicUsize::new(0),
         }
     }
 
@@ -108,22 +108,21 @@ pub fn try_pull<T>(pool: Arc<Pool<T>>) -> Option<Reusable<T>> {
     pool.objects
         .lock()
         .pop()
-        .map(|data| Reusable::new(pool.clone(), data))
+        .map(|data| Reusable::new(Some(pool.clone()), data))
 }
 
 pub fn pull<T, F: Fn() -> T>(pool: Arc<Pool<T>>, fallback: F) -> Reusable<T> {
-    try_pull(pool.clone())
-        .unwrap_or_else(|| Reusable::new(pool.clone(), fallback()))
+    try_pull(pool.clone()).unwrap_or_else(|| Reusable::new(Some(pool.clone()), fallback()))
 }
 
 pub struct Reusable<T> {
-    pool: Arc<Pool<T>>,
+    pool: Option<Arc<Pool<T>>>,
     data: ManuallyDrop<T>,
 }
 
 impl<T> Reusable<T> {
     #[inline]
-    pub fn new(pool: Arc<Pool<T>>, t: T) -> Self {
+    pub fn new(pool: Option<Arc<Pool<T>>>, t: T) -> Self {
         Self {
             pool,
             data: ManuallyDrop::new(t),
@@ -131,7 +130,7 @@ impl<T> Reusable<T> {
     }
 
     #[inline]
-    pub fn detach(mut self) -> (Arc<Pool<T>>, T) {
+    pub fn detach(mut self) -> (Option<Arc<Pool<T>>>, T) {
         let pool = self.pool.clone();
         let ret = unsafe { (pool, self.take()) };
         forget(self);
@@ -162,41 +161,48 @@ impl<T> DerefMut for Reusable<T> {
 impl<T> Drop for Reusable<T> {
     #[inline]
     fn drop(&mut self) {
-        let pool = self.pool.clone();
-        unsafe { pool.attach(self.take()) }
+        if let Some(p) = self.pool.as_mut() {
+            let pool = p.clone();
+            unsafe { pool.attach(self.take()) }
+        } else {
+            unsafe {
+                ManuallyDrop::drop(&mut self.data);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Pool, Reusable};
+    use crate::{pull, try_pull, Pool, Reusable};
     use std::mem::drop;
+    use std::sync::Arc;
 
     #[test]
     fn detach() {
-        let pool = Pool::new(1, || Vec::new());
-        let (pool, mut object) = pool.try_pull().unwrap().detach();
+        let pool = Arc::new(Pool::new("test".to_string(), 1, || Vec::new()));
+        let (pool, mut object) = try_pull(pool).unwrap().detach();
         object.push(1);
-        Reusable::new(&pool, object);
-        assert_eq!(pool.try_pull().unwrap()[0], 1);
+        Reusable::new(pool.clone(), object);
+        assert_eq!(try_pull(pool.unwrap()).unwrap()[0], 1);
     }
 
     #[test]
     fn detach_then_attach() {
-        let pool = Pool::new(1, || Vec::new());
-        let (pool, mut object) = pool.try_pull().unwrap().detach();
+        let pool = Arc::new(Pool::new("test".to_string(), 1, || Vec::new()));
+        let (pool, mut object) = try_pull(pool).unwrap().detach();
         object.push(1);
-        pool.attach(object);
-        assert_eq!(pool.try_pull().unwrap()[0], 1);
+        pool.as_ref().unwrap().attach(object);
+        assert_eq!(try_pull(pool.unwrap()).unwrap()[0], 1);
     }
 
     #[test]
-    fn pull() {
-        let pool = Pool::<Vec<u8>>::new(1, || Vec::new());
+    fn test_pull() {
+        let pool = Arc::new(Pool::<Vec<u8>>::new("test".to_string(), 1, || Vec::new()));
 
-        let object1 = pool.try_pull();
-        let object2 = pool.try_pull();
-        let object3 = pool.pull(|| Vec::new());
+        let object1 = try_pull(pool.clone());
+        let object2 = try_pull(pool.clone());
+        let object3 = pull(pool.clone(), || Vec::new());
 
         assert!(object1.is_some());
         assert!(object2.is_none());
@@ -208,18 +214,18 @@ mod tests {
 
     #[test]
     fn e2e() {
-        let pool = Pool::new(10, || Vec::new());
+        let pool = Arc::new(Pool::new("test".to_string(), 10, || Vec::new()));
         let mut objects = Vec::new();
 
         for i in 0..10 {
-            let mut object = pool.try_pull().unwrap();
+            let mut object = try_pull(pool.clone()).unwrap();
             object.push(i);
             objects.push(object);
         }
 
-        assert!(pool.try_pull().is_none());
+        assert!(try_pull(pool.clone()).is_none());
         drop(objects);
-        assert!(pool.try_pull().is_some());
+        assert!(try_pull(pool.clone()).is_some());
 
         for i in 10..0 {
             let mut object = pool.objects.lock().pop().unwrap();
